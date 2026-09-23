@@ -14,6 +14,66 @@ servicio solo identifica al usuario mediante el claim JWT `sub`.
 3. La API consumidora valida el access token contra `/.well-known/jwks.json`.
 4. La API usa el `sub` como identificador estable del usuario en su propia base.
 
+## Funcionamiento de autenticación
+
+El Auth Service centraliza usuarios, credenciales y sesiones. Cada aplicación conserva sus datos, permisos y reglas de negocio, vinculados al usuario mediante el claim `sub` del access token.
+
+```mermaid
+sequenceDiagram
+    actor U as Usuario
+    participant App as Frontend
+    participant Auth as Auth Service
+    participant DB as PostgreSQL de Auth
+    participant API as Backend de la aplicación
+
+    U->>App: Ingresa email y contraseña
+    App->>Auth: POST /v1/auth/login
+    Auth->>DB: Busca usuario por email
+    DB-->>Auth: Usuario y hash de contraseña
+    Note over Auth: Verifica contraseña con bcrypt
+    Note over Auth: Firma access token con clave privada RSA
+    Auth->>DB: Guarda hash del refresh token
+    Auth-->>App: Access token y refresh token
+    App->>API: Petición con Bearer access_token
+    API->>Auth: GET /.well-known/jwks.json
+    Auth-->>API: Clave pública RSA
+    Note over API: Verifica firma, issuer y vencimiento
+    Note over API: Identifica usuario por sub y evalúa permisos
+    API-->>App: Respuesta
+```
+
+La validación del JWT debe implementarse en cada backend consumidor. La clave pública puede almacenarse en caché; no es necesario consultar al Auth Service en cada petición.
+
+### Claves y tokens
+
+- **Clave privada RSA:** permanece secreta en `AUTH_PRIVATE_KEY_PEM`. Firma los access tokens y debe conservarse entre reinicios y deploys, compartida por todas las instancias del servicio.
+- **Clave pública RSA:** se publica en `/.well-known/jwks.json` y permite verificar las firmas.
+- **Access token:** JWT enviado como credencial a las APIs; dura 15 minutos por defecto.
+- **Refresh token:** token opaco cuyo hash se guarda en PostgreSQL; dura 30 días por defecto y se reemplaza en cada renovación.
+- **Rotación de clave:** con la implementación actual, reemplazar la clave impide validar tokens anteriores con la nueva clave publicada. Los consumidores que conserven la clave anterior en caché pueden seguir aceptándolos hasta actualizarla o hasta que venzan.
+
+### Renovación y cierre de sesión
+
+```mermaid
+sequenceDiagram
+    participant App as Frontend
+    participant Auth as Auth Service
+    participant DB as PostgreSQL de Auth
+
+    App->>Auth: POST /v1/auth/refresh con refresh_token
+    Auth->>DB: Busca hash vigente y no revocado
+    Auth->>DB: Revoca refresh token utilizado
+    Auth->>DB: Guarda hash del nuevo refresh token
+    Auth-->>App: Nuevo access token y refresh token
+    Note over App: Reemplaza ambos tokens guardados
+    App->>Auth: POST /v1/auth/logout con refresh_token
+    Auth->>DB: Revoca ese refresh token
+    Auth-->>App: 204 sin cuerpo
+    Note over App: Elimina los tokens guardados
+```
+
+El logout revoca el refresh token indicado. El access token ya emitido sigue siendo válido hasta su vencimiento. Actualmente las aplicaciones comparten un único conjunto de usuarios.
+
 ## Endpoints
 
 | Método | Ruta | Uso |
